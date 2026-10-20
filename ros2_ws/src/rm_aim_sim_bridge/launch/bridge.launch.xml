@@ -1,0 +1,8 @@
+<launch>
+  <arg name="channel" default="default"/>
+  <arg name="publish_clock" default="true"/>
+  <node pkg="rm_aim_sim_bridge" exec="bridge" name="bridge" namespace="aim_sim" output="screen">
+    <param name="channel" value="$(var channel)"/>
+    <param name="publish_clock" value="$(var publish_clock)"/>
+  </node>
+</launch>

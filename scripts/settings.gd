@@ -6,14 +6,14 @@ static func defaults() -> Dictionary:
 	var result = {
 		"appearance": {"robot": "infantry_3", "team": "blue", "body_model": "",
 			"armor_model": "", "body_scale": 1.0, "armor_scale": 1.0},
-		"target": {"center": Vector3(4, 0, 0), "translate": false, "speed": 1.0,
+		"target": {"center": Vector3(4, 0, 0), "position_offset": Vector3.ZERO, "translate": false, "speed": 1.0,
 			"acceleration": 3.0,
 			"heading": PI / 2.0, "travel": 1.5, "rotate": false, "omega": 4.0,
 			"phase": PI, "radius": 0.0, "height_difference": -0.1,
 			"armor_width": 0.135, "armor_height": 0.125, "armor_tilt": PI / 12.0,
 			"lightbar_spacing": 0.135, "lightbar_length": 0.056,
 			"module_width": 0.140, "module_height": 0.125, "max_health": -1},
-		"gimbal": {"origin": Vector3(0, 0, 0.65), "barrel_length": 0.22,
+		"gimbal": {"origin": Vector3(0, 0, 0.65), "barrel_length": 0.22, "ideal": false,
 			"max_speed": 6.0, "max_acceleration": 50.0, "response_hz": 6.0,
 			"pitch_min": -PI / 6.0, "pitch_max": PI / 9.0},
 		"weapon": {"speed": 23.0, "rate": 10.0, "delay": 0.015,
@@ -135,6 +135,12 @@ static func validate(s: Dictionary) -> String:
 		return "Armor lower edges must be above ground and no higher than 400 mm (2026 S155)"
 	if s.gimbal.origin.z < 0.3 or s.gimbal.origin.z > 3.0:
 		return "Gimbal height must be in [0.3, 3] m"
+	if s.target.position_offset.length() > 10.0:
+		return "Target position offset must be within 10 m"
+	if minf(lower_edge, other_edge) + s.target.position_offset.z < 0.001 - 1e-7:
+		return "Target position offset must keep armor lower edges at least 1 mm above ground"
+	if (s.target.center + s.target.position_offset).length() > 25.0:
+		return "Offset target center must be within 25 m of world origin"
 	if s.target.center.length() > 25.0 or s.gimbal.origin.length() > 25.0:
 		return "Initial positions must be within 25 m of world origin"
 	if absf(s.target.heading) > TAU * 10.0 or absf(s.target.phase) > TAU * 10.0:

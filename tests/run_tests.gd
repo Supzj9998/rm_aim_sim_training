@@ -46,8 +46,10 @@ func _run() -> void:
 	_test_settings()
 	_test_spacing()
 	_test_motion()
+	_test_position_offset()
 	_test_accelerated_translation()
 	_test_gimbal()
+	_test_ideal_gimbal()
 	_test_fire_and_collision()
 	_test_health()
 	_test_hit_flash()
@@ -74,7 +76,7 @@ func _test_settings() -> void:
 		"default config uses 0.4 exposure gain")
 	approx(Settings.defaults().target.center.x, 4.0, 0.0, "default target distance is 4 m")
 	approx(Settings.load_file("res://configs/default.cfg").settings.target.center.x, 4.0, 0.0, "default config distance is 4 m")
-	for name in ["translate", "spin", "combined"]:
+	for name in ["translate", "spin", "combined", "ideal"]:
 		check(Settings.load_file("res://configs/%s.cfg" % name).ok, name + " scenario loads")
 	var s = Settings.defaults()
 	s.weapon.speed = 0.0
@@ -213,6 +215,57 @@ func _test_motion() -> void:
 	approx(sim.time, 0.0, 0.0, "pause freezes time")
 
 
+func _test_position_offset() -> void:
+	var s = Settings.defaults()
+	s.target.position_offset = Vector3(0, 1.0, 0.5)
+	check(Settings.validate(s).is_empty(), "scene offset can raise target above installation height limits")
+	var original = Simulation.new(Settings.defaults())
+	var sim = Simulation.new(s)
+	for index in range(4):
+		check(sim.armor_pose(index, 0).center.is_equal_approx(
+			original.armor_pose(index, 0).center + s.target.position_offset),
+			"scene offset moves each plate without changing its layout")
+	var initial: Vector3 = sim.target_pose(0).center
+	var changed = sim.settings.duplicate(true)
+	changed.target.translate = true
+	sim.apply_settings(changed)
+	check(sim.target_pose(sim.time).center.is_equal_approx(initial), "enabling motion does not add scene offset twice")
+	advance(sim, 0.3)
+	var before: Vector3 = sim.target_pose(sim.time).center
+	changed.target.speed = 2.0
+	sim.apply_settings(changed)
+	check(sim.target_pose(sim.time).center.is_equal_approx(before), "motion edits preserve offset target position")
+	changed.target.position_offset += Vector3(0, -0.3, 0.2)
+	sim.apply_settings(changed)
+	check(sim.target_pose(sim.time).center.is_equal_approx(before + Vector3(0, -0.3, 0.2)),
+		"live scene offset translates the current moving pose exactly once")
+	changed.target.translate = false
+	before = sim.target_pose(sim.time).center
+	sim.apply_settings(changed)
+	check(sim.target_pose(sim.time).center.is_equal_approx(before), "disabling motion freezes offset world pose")
+	sim.reset(changed)
+	check(sim.target_pose(0).center.is_equal_approx(changed.target.center + changed.target.position_offset),
+		"reset restores configured center plus scene offset")
+	var path = "user://position_offset_test.cfg"
+	check(Settings.save_file(s, path) == OK, "scene offset saves")
+	check(Settings.load_file(path).settings.target.position_offset == s.target.position_offset,
+		"scene offset survives config roundtrip")
+	DirAccess.remove_absolute(ProjectSettings.globalize_path(path))
+	s.target.position_offset.z = -0.2
+	check(not Settings.validate(s).is_empty(), "scene offset cannot lower armor underground")
+	# A large lateral offset must also move the projectile lifetime/range boundary.
+	s = base_settings()
+	s.gimbal.ideal = true
+	s.target.position_offset = Vector3(0, 5, 0.4)
+	sim = Simulation.new(s)
+	var solution = AimAssist.solve(sim, false)
+	check(not solution.is_empty(), "offset target has a ballistic solution")
+	if not solution.is_empty():
+		sim.set_command(command(solution.yaw, solution.pitch, true))
+		advance(sim, 0.8)
+		check(sim.stats.hit >= 3, "offset target collision and projectile cleanup use translated geometry")
+
+
 func _test_accelerated_translation() -> void:
 	var s = base_settings()
 	s.target.translate = true
@@ -309,6 +362,42 @@ func _test_gimbal() -> void:
 	sim.set_command(command(-PI + 0.01, 0))
 	sim.step(0.01)
 	check(sim.yaw_velocity > 0, "yaw takes shortest path across wrap")
+
+
+func _test_ideal_gimbal() -> void:
+	var s = base_settings()
+	s.gimbal.ideal = true
+	var sim = Simulation.new(s)
+	sim.set_command(command(1.0, -0.2))
+	approx(sim.yaw, 1.0, 1e-9, "ideal yaw updates on receipt without a physics step")
+	approx(sim.pitch, -0.2, 1e-9, "ideal pitch updates on receipt")
+	sim.step(1.0 / 240.0)
+	approx(sim.yaw, 1.0, 1e-9, "ideal yaw holds the commanded angle")
+	approx(sim.yaw_velocity, 0.0, 0.0, "ideal gimbal has no residual servo velocity")
+	sim.set_command(command(TAU + 0.3, 10.0))
+	approx(sim.yaw, 0.3, 1e-6, "ideal yaw still wraps")
+	approx(sim.pitch, s.gimbal.pitch_max, 1e-9, "ideal pitch still respects mechanical limit")
+	sim.stop()
+	advance(sim, 0.1)
+	approx(sim.yaw, 0.3, 1e-6, "ideal stop holds angle without drift")
+	sim = Simulation.new(s)
+	sim.set_command(command(0.1, -0.1, true))
+	advance(sim, 0.02)
+	check(sim.stats.fired == 1, "ideal mode preserves launch delay and firing")
+	approx(sim.events[0].yaw, 0.1, 1e-9, "ideal shot uses commanded yaw")
+	approx(sim.events[0].pitch, -0.1, 1e-9, "ideal shot uses commanded pitch")
+	var normal = Simulation.new(base_settings())
+	normal.set_command(command(1.0, -0.2))
+	normal.step(1.0 / 240.0)
+	var changed = normal.settings.duplicate(true)
+	changed.gimbal.ideal = true
+	normal.apply_settings(changed)
+	approx(normal.yaw, 1.0, 1e-9, "live switch to ideal immediately applies pending angle")
+	changed.gimbal.ideal = false
+	normal.apply_settings(changed)
+	normal.set_command(command(0.5, 0.0))
+	normal.step(1.0 / 240.0)
+	check(normal.yaw > 0.5, "switching off ideal restores servo response")
 
 
 func _test_fire_and_collision() -> void:

@@ -93,7 +93,7 @@ func apply_settings(updated: Dictionary, reset_health: bool = false) -> void:
 	if translation_changed or was_stopped:
 		# Keep the configured center as the path center. Re-centering on the current pose made every
 		# live edit shift the legal travel range and allowed repeated edits to drift indefinitely.
-		var desired: Vector3 = pose.center + updated.target.center - settings.target.center
+		var desired: Vector3 = pose.center - settings.target.position_offset + updated.target.center - settings.target.center
 		if updated.target.translate:
 			var axis = Vector3(cos(updated.target.heading), sin(updated.target.heading), 0.0)
 			translation_start_offset = clampf(
@@ -112,6 +112,8 @@ func apply_settings(updated: Dictionary, reset_health: bool = false) -> void:
 	var health_changed: bool = reset_health or updated.target.max_health != settings.target.max_health \
 		or updated.appearance.robot != settings.appearance.robot
 	settings = updated.duplicate(true)
+	if settings.gimbal.ideal:
+		_apply_ideal_gimbal()
 	if health_changed:
 		max_health = _configured_health(settings)
 		health = max_health
@@ -135,8 +137,19 @@ func set_command(value: Dictionary) -> void:
 	if not command.control:
 		command.fire = false
 		pending.clear()
+	if settings.gimbal.ideal:
+		_apply_ideal_gimbal()
 	if command.fire and not was_firing:
 		next_trigger = maxf(next_trigger, time)
+
+
+# Ideal mode updates immediately when a command arrives; no servo or rate limits.
+func _apply_ideal_gimbal() -> void:
+	if command.control:
+		yaw = command.yaw
+		pitch = clampf(command.pitch, settings.gimbal.pitch_min, settings.gimbal.pitch_max)
+	yaw_velocity = 0.0
+	pitch_velocity = 0.0
 
 
 func stop() -> void:
@@ -200,7 +213,7 @@ func _translation_state(at: float) -> Dictionary:
 func target_pose(at: float) -> Dictionary:
 	var motion_at = minf(at, motion_stop_time) if motion_stop_time >= 0.0 else at
 	var t: Dictionary = settings.target
-	var center = translation_origin
+	var center = translation_origin + t.position_offset
 	if t.translate:
 		var motion = _translation_state(at)
 		center += Vector3(cos(t.heading), sin(t.heading), 0.0) * float(motion.offset)
@@ -298,7 +311,9 @@ func _substep(dt: float) -> void:
 	var end = time + dt
 	var old_yaw = yaw
 	var old_pitch = pitch
-	if command.control:
+	if settings.gimbal.ideal:
+		_apply_ideal_gimbal()
+	elif command.control:
 		var y = _axis_step(yaw, yaw_velocity, command.yaw, command.yaw_vel, command.yaw_acc, dt, true)
 		var p = _axis_step(pitch, pitch_velocity, command.pitch, command.pitch_vel, command.pitch_acc, dt, false)
 		yaw = wrapf(y.x, -PI, PI)
@@ -354,7 +369,8 @@ func bullet_position(bullet: Dictionary, at: float) -> Vector3:
 
 func _outside_target_range(bullet: Dictionary, at: float) -> bool:
 	var origin: Vector3 = bullet.origin
-	var offset = Vector2(translation_origin.x - origin.x, translation_origin.y - origin.y)
+	var center: Vector3 = translation_origin + settings.target.position_offset
+	var offset = Vector2(center.x - origin.x, center.y - origin.y)
 	var half_diagonal = Vector2(settings.target.armor_width, settings.target.armor_height).length() * 0.5
 	var limit = offset.length() + settings.target.radius + half_diagonal + 0.1
 	if settings.target.translate:
@@ -465,6 +481,7 @@ func snapshot() -> Dictionary:
 		"tick": tick, "sim_time": time, "paused": paused,
 		"gimbal": {"yaw": yaw, "pitch": pitch, "yaw_vel": yaw_velocity,
 			"pitch_vel": pitch_velocity, "origin": vec(settings.gimbal.origin),
+			"ideal": settings.gimbal.ideal,
 			"quaternion_wxyz": [orientation.w, orientation.x, orientation.y, orientation.z]},
 		"weapon": {"speed": settings.weapon.speed, "rate": settings.weapon.rate,
 			"delay": settings.weapon.delay, "barrel_length": settings.gimbal.barrel_length,

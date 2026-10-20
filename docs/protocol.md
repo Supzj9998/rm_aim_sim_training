@@ -111,7 +111,7 @@ direction = [cos(pitch)*cos(yaw), cos(pitch)*sin(yaw), -sin(pitch)]
 
 | 对象 | 字段与含义 |
 |---|---|
-| `gimbal` | `yaw/pitch` 实际角 rad；`yaw_vel/pitch_vel` 实际角速度 rad/s；`origin` 世界位置三元数组；`quaternion_wxyz` 四元数四元数组 |
+| `gimbal` | `yaw/pitch` 实际角 rad；`yaw_vel/pitch_vel` 实际角速度 rad/s；`origin` 世界位置三元数组；`ideal` 为是否启用指令立即到位；`quaternion_wxyz` 四元数四元数组 |
 | `weapon` | `speed` m/s、`rate` Hz、`delay` s、`barrel_length` m、`gravity` m/s²、`damage` HP；不包含 lifetime |
 | `health` | `current/maximum` 整数 HP，`alive` boolean，`death_time` 仿真秒，未死亡为 -1 |
 | `appearance` | `robot/team/armor_model/body_model` 字符串、`armor_scale/body_scale` 数值；body 字段为不加载的历史配置 |

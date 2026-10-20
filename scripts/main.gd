@@ -280,6 +280,17 @@ func _build_ui() -> void:
 	_add_slider(column, "target.radius", "装甲伸展", 0.05, Presets.MAX_EXTENT)
 	_add_slider(column, "target.height_difference", "两组装甲高度差", -0.1, 0.1)
 	column.add_child(_label("下沿离地 1–400 mm · 高度差 ≤100 mm", 12, Color("91acbb")))
+	_section(column, "装甲位置 / 整组偏移")
+	_add_number(column, "target.position_offset.y", "左右偏移 / m · 左正", -5, 5, 0.05)
+	_add_number(column, "target.position_offset.z", "上下偏移 / m · 上正", -3, 3, 0.05)
+	_add_button(column, "装甲位置偏移归零", func():
+		_updating_fields = true
+		fields["target.position_offset.y"].value = 0.0
+		fields["target.position_offset.z"].value = 0.0
+		_updating_fields = false
+		_apply_fields("target.position_offset"))
+	column.add_child(_label("平移整组装甲与运动轨迹，保留安装高度差。", 12, Color("91acbb"), true))
+	_section(column, "靶车运动")
 	_add_toggle(column, "target.translate", "开启平移")
 	_add_number(column, "target.speed", "平移速度 / m·s⁻¹", 0, 10, 0.1)
 	_add_number(column, "target.acceleration", "平移加速度 / m·s⁻²", 0.1, 50, 0.1)
@@ -297,6 +308,7 @@ func _build_ui() -> void:
 	_add_number(column, "weapon.damage", "单发伤害 / HP", 0, 10000, 1)
 	_add_number(column, "weapon.rate", "射频 / Hz", 0.1, 50, 0.5)
 	_add_number(column, "weapon.delay", "发射延迟 / ms", 0, 1000, 1)
+	_add_toggle(column, "gimbal.ideal", "理想云台（指令立即到位）")
 	_add_number(column, "gimbal.max_speed", "云台限速 / rad·s⁻¹", 0.1, 20, 0.1)
 	_add_number(column, "gimbal.max_acceleration", "角加速度 / rad·s⁻²", 0.1, 500, 1)
 	_section(column, "03  相机")
@@ -665,7 +677,7 @@ func _setting_get(s: Dictionary, path: String) -> Variant:
 	var parts = path.split(".")
 	var value = s[parts[0]][parts[1]]
 	if parts.size() == 3:
-		return value.x if parts[2] == "x" else value.z
+		return value["xyz".find(parts[2])]
 	return value
 
 
@@ -673,10 +685,7 @@ func _setting_set(s: Dictionary, path: String, value: Variant) -> void:
 	var parts = path.split(".")
 	if parts.size() == 3:
 		var vector: Vector3 = s[parts[0]][parts[1]]
-		if parts[2] == "x":
-			vector.x = value
-		else:
-			vector.z = value
+		vector["xyz".find(parts[2])] = value
 		s[parts[0]][parts[1]] = vector
 	else:
 		s[parts[0]][parts[1]] = value
@@ -722,6 +731,10 @@ func _update_height_limits() -> void:
 	var lower = height.value
 	difference.min_value = maxf(-0.1, 0.001 - lower)
 	difference.max_value = minf(0.1, 0.4 - lower)
+	# Scene translation is independent of installation height, but cannot move armor underground.
+	var offset: SpinBox = fields["target.position_offset.z"]
+	# Range snaps relative to min_value: align the lower bound so zero stays exactly representable.
+	offset.min_value = ceilf((0.001 - minf(lower, lower + difference.value)) / offset.step) * offset.step
 	slider_labels["target.center.z"].text = "基准装甲下沿 %.0f mm" % (lower * 1000.0)
 	slider_labels["target.height_difference"].text = "两组装甲高度差 %+.0f mm" % (difference.value * 1000.0)
 	_updating_fields = previous

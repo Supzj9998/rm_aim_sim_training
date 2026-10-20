@@ -200,6 +200,22 @@ func _run() -> void:
 	check(is_equal_approx(main.fields["target.center.z"].value, 0.2), "initial lower-edge slider is 200 mm")
 	check(is_equal_approx(main.fields["target.height_difference"].value, -0.1), "initial height difference is -100 mm")
 	check(main.fields["target.radius"] is HSlider and is_equal_approx(main.fields["target.radius"].value, 0.55), "initial spacing slider is 550 mm")
+	var position_session: String = main.model.session_id
+	var position_time: float = main.model.time
+	var position_before: Vector3 = main.model.target_pose(main.model.time).center
+	main.fields["target.position_offset.y"].value = 0.5
+	main.fields["target.position_offset.z"].value = 0.3
+	check(main.model.target_pose(main.model.time).center.is_equal_approx(position_before + Vector3(0, 0.5, 0.3)),
+		"position controls move armor left and up immediately: before=%s actual=%s offset=%s fields=(%s,%s)" % [position_before, main.model.target_pose(main.model.time).center, main.model.settings.target.position_offset, main.fields["target.position_offset.y"].value, main.fields["target.position_offset.z"].value])
+	check(main.model.session_id == position_session and main.model.time == position_time,
+		"position controls preserve round and simulation time")
+	main.fields["target.position_offset.z"].value = -3.0
+	check(Settings.validate(main.model.settings).is_empty(), "downward control clamps before armor crosses ground")
+	main.fields["target.position_offset.y"].value = 0.0
+	main.fields["target.position_offset.z"].value = 0.0
+	check(main.model.target_pose(main.model.time).center.is_equal_approx(position_before),
+		"position controls return armor to its original location: before=%s actual=%s offset=%s" % [position_before, main.model.target_pose(main.model.time).center, main.model.settings.target.position_offset])
+
 	var transport = preload("res://scripts/bridge.gd").new()
 	main.model.settings.ipc.channel = "ui_test_%d" % OS.get_process_id()
 	check(transport.setup(main.model) == OK, "isolated shared memory publisher starts")
