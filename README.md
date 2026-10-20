@@ -27,10 +27,8 @@ Godot 仿真 ←共享内存→ C++ ROS 2 桥接 ←ROS 话题→ 学员自瞄�
 
 ### 1. 下载源码和引擎
 
-仓库地址、分支以教师发布的信息为准；使用队内 fork 时替换下面的地址。
-
 ```bash
-git clone https://github.com/ForgetWW520/rm_aim_sim.git
+git clone https://github.com/Supzj9998/rm_aim_sim_training
 cd rm_aim_sim
 python3 tools/setup_godot.py
 ./run.sh --headless --editor --import --quit
