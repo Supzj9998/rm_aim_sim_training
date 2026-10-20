@@ -29,7 +29,7 @@ Godot 仿真 ←共享内存→ C++ ROS 2 桥接 ←ROS 话题→ 学员自瞄�
 
 ```bash
 git clone https://github.com/Supzj9998/rm_aim_sim_training
-cd rm_aim_sim
+cd rm_aim_sim_training
 python3 tools/setup_godot.py
 ./run.sh --headless --editor --import --quit
 ```
