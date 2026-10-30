@@ -44,10 +44,9 @@ static func mesh_bounds(root: Node3D) -> AABB:
 	return result
 
 
-static func fit_model(root: Node3D, size: float, factor: float, armor: bool) -> Node3D:
+static func fit_model(root: Node3D, size: float, factor: float) -> Node3D:
 	var box = mesh_bounds(root)
-	var extent = box.size.x if armor else maxf(box.size.x, box.size.z)
-	var scale_factor = size / maxf(extent, 0.001) * factor
+	var scale_factor = size / maxf(box.size.x, 0.001) * factor
 	var wrapper = Node3D.new()
 	wrapper.add_child(root)
 	root.scale *= scale_factor

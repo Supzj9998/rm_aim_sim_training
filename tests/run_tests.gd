@@ -26,6 +26,8 @@ func approx(actual: float, expected: float, tolerance: float, message: String) -
 
 func base_settings() -> Dictionary:
 	var s = Settings.defaults()
+	# Keep servo and delayed-launch coverage independent of the assessment default.
+	s.gimbal.ideal = false
 	s.target.armor_tilt = 0.0
 	s.target.center = Vector3(6, 0, 0.65)
 	s.weapon.gravity = 0.0
@@ -52,12 +54,14 @@ func _run() -> void:
 	_test_ideal_gimbal()
 	_test_fire_and_collision()
 	_test_health()
+	_test_round_score()
 	_test_hit_flash()
 	_test_death_motion()
 	_test_live_settings()
 	_test_aim_assist()
 	_test_projectile_cleanup()
 	_test_moving_collision()
+	_test_armor_corners()
 	_test_camera()
 	_test_bridge()
 	if failures.is_empty():
@@ -71,6 +75,8 @@ func _run() -> void:
 func _test_settings() -> void:
 	check(Settings.validate(Settings.defaults()).is_empty(), "default settings valid")
 	check(Settings.load_file("res://configs/default.cfg").ok, "default config loads")
+	check(Settings.defaults().gimbal.ideal, "default settings enable the ideal gimbal")
+	check(Settings.load_file("res://configs/default.cfg").settings.gimbal.ideal, "default scene enables the ideal gimbal")
 	approx(Settings.defaults().camera.brightness_gain, 0.4, 0.0, "camera exposure gain defaults to 0.4")
 	approx(Settings.load_file("res://configs/default.cfg").settings.camera.brightness_gain, 0.4, 0.0,
 		"default config uses 0.4 exposure gain")
@@ -435,7 +441,7 @@ func _test_fire_and_collision() -> void:
 	sim.pitch = atan2(0.16, 6.0)
 	sim.set_command(command(0, sim.pitch, true))
 	advance(sim, 0.2, 0.02)
-	check(sim.stats.body == 0 and sim.stats.hit == 0 and sim.stats.expired >= 1, "empty space below armor has no invisible chassis collision")
+	check(sim.stats.hit == 0 and sim.stats.expired >= 1, "empty space below armor has no invisible chassis collision")
 	sim.reset(s)
 	sim.yaw = 0.3
 	sim.set_command(command(sim.yaw, 0, true))
@@ -491,6 +497,63 @@ func _test_health() -> void:
 	check(sim.health == 0 and sim.stats.damage == 100, "new projectile uses live damage value")
 	sim.apply_settings(changed, true)
 	check(sim.health == 100 and sim.stats.damage == 100 and sim.stats.kills == 1, "explicit health edit restores same maximum without clearing statistics")
+
+
+func _test_round_score() -> void:
+	var s = base_settings()
+	s.target.max_health = 35
+	var sim = Simulation.new(s)
+	sim.set_command(command(0, 0, true))
+	advance(sim, 0.6)
+	var score = sim.metrics()
+	check(score.score_frozen and score.valid_hits == 2, "score includes lethal hit and freezes at first death")
+	var fired_before_death = 0
+	for event in sim.events:
+		if event.type == "shot" and event.time <= sim.death_time:
+			fired_before_death += 1
+	check(score.score_fired == fired_before_death, "score denominator includes all releases before death, including in-flight shots")
+	approx(score.score_hit_rate, 2.0 / fired_before_death, 1e-9, "score uses effective hits divided by released shots")
+	approx(score.kill_time, sim.death_time, 1e-9, "score records exact lethal impact time")
+	advance(sim, 1.0)
+	var after = sim.metrics()
+	check(after.hit > score.hit and after.fired > score.fired, "physical firing and collisions continue after death")
+	for key in ["valid_hits", "score_fired", "score_hit_rate", "score_frozen", "kill_time"]:
+		check(after[key] == score[key], "post-death shots cannot change " + key)
+	sim.apply_settings(s, true)
+	check(sim.health == 35 and sim.metrics().score_frozen, "restoring health does not reopen frozen round")
+	advance(sim, 0.6)
+	check(sim.metrics().valid_hits == score.valid_hits, "revived target cannot increase frozen valid hits")
+	sim.reset()
+	check(not sim.metrics().score_frozen and sim.metrics().score_fired == 0 \
+		and sim.metrics().valid_hits == 0 and sim.metrics().kill_time == -1.0, "reset opens a clean scoring round")
+	s.target.max_health = 0
+	sim.reset(s)
+	sim.set_command(command(0, 0, true))
+	advance(sim, 0.5)
+	check(sim.metrics().score_frozen and sim.metrics().score_fired == 0 \
+		and sim.metrics().score_hit_rate == 0.0, "initially dead target has zero frozen score")
+	# A release later than the lethal impact in the same 1 ms substep is excluded.
+	s = base_settings()
+	s.target.max_health = 20
+	s.weapon.speed = 100.0
+	s.target.center.x = s.target.radius + s.gimbal.barrel_length + 5.55
+	sim.reset(s)
+	sim._spawn(0.0, 0.0, 0.0)
+	sim.pending.append(0.0558)
+	sim.step(0.056)
+	check(sim.stats.fired == 2 and sim.metrics().score_fired == 1, "same-substep release after death is outside score cutoff")
+	approx(sim.metrics().score_hit_rate, 1.0, 1e-9, "same-substep release does not dilute frozen score")
+	# Projectile storage order must not decide which impact is lethal.
+	sim.reset(s)
+	sim._spawn(0.0, 0.0, 0.0)
+	sim._spawn(0.0002, 0.0, 0.0)
+	sim.step(0.056)
+	var impact_ids: Array = []
+	for event in sim.events:
+		if event.type == "impact":
+			impact_ids.append(event.id)
+	check(impact_ids == [0, 1], "impacts within one substep resolve in chronological order")
+	check(sim.metrics().valid_hits == 1 and sim.stats.hit == 2, "only the first chronological lethal impact is an effective hit")
 
 
 func _test_hit_flash() -> void:
@@ -739,6 +802,37 @@ func _test_moving_collision() -> void:
 	advance(coarse, 1.0, 0.02)
 	advance(fine, 1.0, 0.001)
 	check(coarse.stats == fine.stats, "rotating target collision is stable across outer step sizes")
+
+
+func _test_armor_corners() -> void:
+	for robot in ["infantry_3", "hero"]:
+		var s = Settings.defaults()
+		Presets.apply_robot(s, robot)
+		s.target.phase = 0.37
+		s.target.translate = true
+		s.target.rotate = true
+		s.target.position_offset = Vector3(0.2, -0.3, 0.15)
+		var sim = Simulation.new(s)
+		advance(sim, 0.37)
+		var snapshot = sim.snapshot()
+		for index in range(4):
+			var armor = sim.armor_pose(index, sim.time)
+			var corners = sim.armor_corners(index, sim.time)
+			check(corners.size() == 4, "four 3D corners per plate: " + robot)
+			var average = Vector3.ZERO
+			for point in corners:
+				average += point * 0.25
+				approx((point - armor.center).dot(armor.normal), 0.0, 1e-6, "corners lie in tilted armor plane")
+			check(average.distance_to(armor.center) < 1e-6, "corner mean follows plate translation, rotation and height offset")
+			approx(corners[0].distance_to(corners[1]), s.target.armor_width, 1e-6, "top edge uses scoring width")
+			approx(corners[1].distance_to(corners[2]), s.target.armor_height, 1e-6, "right edge uses scoring height rather than lightbar length")
+			check((corners[1] - corners[0]).normalized().dot(armor.tangent) > 0.9999, "corner order runs left to right on outward face")
+			check((corners[0] - corners[3]).normalized().dot(armor.up) > 0.9999, "corner order runs bottom to top on outward face")
+			check((corners[1] - corners[0]).cross(corners[0] - corners[3]).normalized().dot(armor.normal) > 0.9999,
+				"corner winding recovers outward plate normal")
+			var serialized: Array = snapshot.truth.armors[index].corners
+			check(serialized.size() == 4 and Vector3(serialized[0][0], serialized[0][1], serialized[0][2]).distance_to(corners[0]) < 1e-6,
+				"snapshot publishes 3D corners in world coordinates")
 
 
 func _test_camera() -> void:

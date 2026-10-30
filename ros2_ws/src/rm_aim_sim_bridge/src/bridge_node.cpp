@@ -1,5 +1,9 @@
 #include "rm_aim_sim_bridge/control_gate.hpp"
 #include "rm_aim_sim_bridge/mailbox.hpp"
+#include "rm_aim_sim_bridge/msg/aim_command.hpp"
+#include "rm_aim_sim_bridge/msg/armor_corners_array.hpp"
+#include "rm_aim_sim_bridge/msg/gimbal_state.hpp"
+#include "rm_aim_sim_bridge/msg/telemetry.hpp"
 
 #include <chrono>
 #include <cmath>
@@ -8,18 +12,15 @@
 #include <string>
 
 #include <rclcpp/rclcpp.hpp>
-#include <diagnostic_msgs/msg/diagnostic_array.hpp>
-#include <geometry_msgs/msg/pose_array.hpp>
 #include <rosgraph_msgs/msg/clock.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/bool.hpp>
-#include <std_msgs/msg/string.hpp>
 
 namespace rm_aim_sim_bridge
 {
 using Steady = std::chrono::steady_clock;
-using JointState = sensor_msgs::msg::JointState;
-using Bool = std_msgs::msg::Bool;
+using AimCommand = rm_aim_sim_bridge::msg::AimCommand;
+using ArmorCornersArray = rm_aim_sim_bridge::msg::ArmorCornersArray;
+using GimbalState = rm_aim_sim_bridge::msg::GimbalState;
+using Telemetry = rm_aim_sim_bridge::msg::Telemetry;
 
 double wall_seconds()
 {
@@ -52,23 +53,18 @@ public:
       throw std::invalid_argument("poll_hz must be [1,1000], timeout_sec must be [0.02,0.25]");
     }
     const auto latest = rclcpp::QoS(1).reliable().durability_volatile();
-    armors_pub_ = create_publisher<geometry_msgs::msg::PoseArray>("armors", latest);
-    gimbal_pub_ = create_publisher<JointState>("gimbal", latest);
-    telemetry_pub_ = create_publisher<diagnostic_msgs::msg::DiagnosticArray>("telemetry", latest);
-    session_pub_ = create_publisher<std_msgs::msg::String>(
-      "session", rclcpp::QoS(1).reliable().transient_local());
+    armors_pub_ = create_publisher<ArmorCornersArray>("armors", latest);
+    gimbal_pub_ = create_publisher<GimbalState>("gimbal", latest);
+    telemetry_pub_ = create_publisher<Telemetry>("telemetry", latest);
     if (clock_enabled) {clock_pub_ = create_publisher<rosgraph_msgs::msg::Clock>("/clock", latest);}
-    command_sub_ = create_subscription<JointState>("command", latest,
-      [this](JointState::ConstSharedPtr msg) {
+    command_sub_ = create_subscription<AimCommand>("command", latest,
+      [this](AimCommand::ConstSharedPtr msg) {
         const double stamp = msg->header.stamp.sec + msg->header.stamp.nanosec * 1e-9;
-        if (!gate_.angles(msg->name, msg->position, stamp, msg->header.frame_id, wall_seconds())) {
-          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Rejected stale or invalid angle command");
+        if (!gate_.accept(msg->session_id, stamp, msg->header.frame_id,
+          msg->yaw, msg->pitch, msg->enable, msg->fire, wall_seconds())) {
+          RCLCPP_WARN_THROTTLE(get_logger(), *get_clock(), 2000, "Rejected stale, out-of-order or invalid command/session");
         }
       });
-    enable_sub_ = create_subscription<Bool>("enable", latest,
-      [this](Bool::ConstSharedPtr msg) {gate_.enable(msg->data, wall_seconds());});
-    fire_sub_ = create_subscription<Bool>("fire", latest,
-      [this](Bool::ConstSharedPtr msg) {gate_.fire(msg->data, wall_seconds());});
     // wall timer 不受 use_sim_time、暂停或 /clock 回退影响。
     timer_ = create_wall_timer(std::chrono::duration<double>(1.0 / rate), [this]() {poll();});
     RCLCPP_INFO(get_logger(), "Waiting for IPC channel %s; ROS pitch is positive UP",
@@ -85,9 +81,10 @@ private:
 
   void publish_unavailable()
   {
-    geometry_msgs::msg::PoseArray empty;
+    ArmorCornersArray empty;
     empty.header.frame_id = "odom";
     empty.header.stamp = last_stamp_;
+    empty.session_id = last_session_;
     armors_pub_->publish(empty);
   }
 
@@ -122,16 +119,12 @@ private:
       clock.clock = last_stamp_;
       clock_pub_->publish(clock);
     }
-    const Json context = Json::array({state.at("publisher_id"), state.at("session_id")});
-    if (context != last_context_) {
-      std_msgs::msg::String session;
-      session.data = context[0].get<std::string>() + "/" + context[1].get<std::string>();
-      session_pub_->publish(session);
-      last_context_ = context;
-    }
-    geometry_msgs::msg::PoseArray armors;
+    last_session_ = state.at("publisher_id").get<std::string>() + "/" +
+      state.at("session_id").get<std::string>();
+    ArmorCornersArray armors;
     armors.header.frame_id = "odom";
     armors.header.stamp = last_stamp_;
+    armors.session_id = last_session_;
     const bool paused = state.at("paused").get<bool>();
     const bool enabled = state.at("ipc").at("enabled").get<bool>();
     const auto & actual = state.at("gimbal");
@@ -142,58 +135,46 @@ private:
           visible = visible || armor.at("id") == observation.at("id");
         }
         if (!visible) {continue;}
-        geometry_msgs::msg::Pose pose;
+        rm_aim_sim_bridge::msg::ArmorCorners plate;
+        const auto & corners = armor.at("corners");
         // 只平移原点：仿真世界和考核 odom 的轴向一致。
-        pose.position.x = armor.at("center")[0].get<double>() - actual.at("origin")[0].get<double>();
-        pose.position.y = armor.at("center")[1].get<double>() - actual.at("origin")[1].get<double>();
-        pose.position.z = armor.at("center")[2].get<double>() - actual.at("origin")[2].get<double>();
-        pose.orientation.w = 1.0;  // 占位，不提供装甲姿态。
-        armors.poses.push_back(pose);
+        for (size_t i = 0; i < plate.corners.size(); ++i) {
+          plate.corners[i].x = corners.at(i).at(0).get<double>() - actual.at("origin")[0].get<double>();
+          plate.corners[i].y = corners.at(i).at(1).get<double>() - actual.at("origin")[1].get<double>();
+          plate.corners[i].z = corners.at(i).at(2).get<double>() - actual.at("origin")[2].get<double>();
+        }
+        armors.armors.push_back(plate);
       }
     }
     armors_pub_->publish(armors);
-    JointState joints;
-    joints.header = armors.header;
-    joints.name = {"yaw", "pitch"};
-    joints.position = {actual.at("yaw").get<double>(), -actual.at("pitch").get<double>()};
-    joints.velocity = {actual.at("yaw_vel").get<double>(), -actual.at("pitch_vel").get<double>()};
-    gimbal_pub_->publish(joints);
-    diagnostic_msgs::msg::DiagnosticArray telemetry;
+    GimbalState gimbal;
+    gimbal.header = armors.header;
+    gimbal.yaw = actual.at("yaw").get<double>();
+    gimbal.pitch = -actual.at("pitch").get<double>();
+    gimbal.yaw_velocity = actual.at("yaw_vel").get<double>();
+    gimbal.pitch_velocity = -actual.at("pitch_vel").get<double>();
+    gimbal_pub_->publish(gimbal);
+    Telemetry telemetry;
     telemetry.header = armors.header;
-    for (const auto & name : {"weapon", "stats", "health", "ipc"}) {
-      diagnostic_msgs::msg::DiagnosticStatus status;
-      status.name = std::string("aim_sim/") + name;
-      status.hardware_id = state.at("publisher_id").get<std::string>();
-      status.level = paused || !enabled ?
-        diagnostic_msgs::msg::DiagnosticStatus::WARN : diagnostic_msgs::msg::DiagnosticStatus::OK;
-      status.message = paused ? "paused" : (enabled ? "running" : "external control disabled");
-      for (const auto & item : state.at(name).items()) {
-        diagnostic_msgs::msg::KeyValue value;
-        value.key = item.key();
-        value.value = item.value().is_string() ? item.value().get<std::string>() : item.value().dump();
-        status.values.push_back(value);
-      }
-      diagnostic_msgs::msg::KeyValue paused_value;
-      paused_value.key = "paused";
-      paused_value.value = paused ? "true" : "false";
-      status.values.push_back(paused_value);
-      telemetry.status.push_back(status);
-    }
+    const auto & weapon = state.at("weapon");
+    telemetry.speed = weapon.at("speed").get<double>();
+    telemetry.gravity = weapon.at("gravity").get<double>();
+    telemetry.barrel_length = weapon.at("barrel_length").get<double>();
+    telemetry.rate = weapon.at("rate").get<double>();
+    telemetry.delay = weapon.at("delay").get<double>();
     telemetry_pub_->publish(telemetry);
   }
 
   Mailbox mailbox_;
   ControlGate gate_;
   rclcpp::TimerBase::SharedPtr timer_;
-  rclcpp::Publisher<geometry_msgs::msg::PoseArray>::SharedPtr armors_pub_;
-  rclcpp::Publisher<JointState>::SharedPtr gimbal_pub_;
-  rclcpp::Publisher<diagnostic_msgs::msg::DiagnosticArray>::SharedPtr telemetry_pub_;
-  rclcpp::Publisher<std_msgs::msg::String>::SharedPtr session_pub_;
+  rclcpp::Publisher<ArmorCornersArray>::SharedPtr armors_pub_;
+  rclcpp::Publisher<GimbalState>::SharedPtr gimbal_pub_;
+  rclcpp::Publisher<Telemetry>::SharedPtr telemetry_pub_;
   rclcpp::Publisher<rosgraph_msgs::msg::Clock>::SharedPtr clock_pub_;
-  rclcpp::Subscription<JointState>::SharedPtr command_sub_;
-  rclcpp::Subscription<Bool>::SharedPtr enable_sub_, fire_sub_;
+  rclcpp::Subscription<AimCommand>::SharedPtr command_sub_;
   builtin_interfaces::msg::Time last_stamp_;
-  Json last_context_;
+  std::string last_session_;
   bool was_ready_{false};
 };
 }  // namespace rm_aim_sim_bridge

@@ -22,6 +22,10 @@ var team_select: OptionButton
 var camera_resolution: OptionButton
 var remote: CheckButton
 var pause_button: Button
+var coordinate_toggle: CheckButton
+var coordinate_frames: Dictionary = {}
+var coordinate_panel: PanelContainer
+var coordinate_readout: Label
 var status_label: Label
 var stats_label: Label
 var health_label: Label
@@ -57,7 +61,7 @@ func _ready() -> void:
 			config_path = arg.trim_prefix("--config=")
 		elif arg == "--remote":
 			start_remote = true
-		elif arg in ["--no-ipc", "--no-network"]:
+		elif arg == "--no-ipc":
 			no_ipc = true
 		elif arg.begins_with("--capture="):
 			capture_path = arg.trim_prefix("--capture=")
@@ -259,11 +263,16 @@ func _build_ui() -> void:
 	column.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	column.add_theme_constant_override("separation", 10)
 	scroll.add_child(column)
+	# Keep configuration bindings for settings omitted from the assessment UI.
+	var hidden_controls = VBoxContainer.new()
+	hidden_controls.name = "HiddenControls"
+	hidden_controls.hide()
+	column.add_child(hidden_controls)
 	var title = _label("AIM LAB", 30, Color("5be2d4"))
 	column.add_child(title)
 	column.add_child(_label("RoboMaster · 自瞄仿真", 14, Color("91acbb")))
 	pause_button = _add_button(column, "P  暂停", _toggle_pause)
-	_section(column, "01  靶车与阵营")
+	_section(column, "01  靶车")
 	robot_select = OptionButton.new()
 	for robot in Presets.ROBOTS:
 		robot_select.add_item(Presets.ROBOTS[robot].label)
@@ -273,13 +282,13 @@ func _build_ui() -> void:
 	team_select = OptionButton.new()
 	team_select.add_item("蓝方装甲")
 	team_select.add_item("红方装甲")
-	column.add_child(team_select)
+	hidden_controls.add_child(team_select)
 	_add_number(column, "target.max_health", "设置血量 / HP", 0, 10000, 1)
 	_add_number(column, "target.center.x", "初始距离 / m", 1, 20, 0.1)
-	_add_slider(column, "target.center.z", "基准装甲下沿", 0.001, 0.4)
-	_add_slider(column, "target.radius", "装甲伸展", 0.05, Presets.MAX_EXTENT)
-	_add_slider(column, "target.height_difference", "两组装甲高度差", -0.1, 0.1)
-	column.add_child(_label("下沿离地 1–400 mm · 高度差 ≤100 mm", 12, Color("91acbb")))
+	_add_slider(hidden_controls, "target.center.z", "基准装甲下沿", 0.001, 0.4)
+	_add_slider(hidden_controls, "target.radius", "装甲伸展", 0.05, Presets.MAX_EXTENT)
+	_add_slider(hidden_controls, "target.height_difference", "两组装甲高度差", -0.1, 0.1)
+	hidden_controls.add_child(_label("下沿离地 1–400 mm · 高度差 ≤100 mm", 12, Color("91acbb")))
 	_section(column, "装甲位置 / 整组偏移")
 	_add_number(column, "target.position_offset.y", "左右偏移 / m · 左正", -5, 5, 0.05)
 	_add_number(column, "target.position_offset.z", "上下偏移 / m · 上正", -3, 3, 0.05)
@@ -290,27 +299,28 @@ func _build_ui() -> void:
 		_updating_fields = false
 		_apply_fields("target.position_offset"))
 	column.add_child(_label("平移整组装甲与运动轨迹，保留安装高度差。", 12, Color("91acbb"), true))
-	_section(column, "靶车运动")
 	_add_toggle(column, "target.translate", "开启平移")
-	_add_number(column, "target.speed", "平移速度 / m·s⁻¹", 0, 10, 0.1)
-	_add_number(column, "target.acceleration", "平移加速度 / m·s⁻²", 0.1, 50, 0.1)
-	_add_number(column, "target.heading", "平移方向 / °", -180, 180, 1)
-	_add_number(column, "target.travel", "往返半程 / m", 0.1, 10, 0.1)
+	var translation_column = _add_foldout(column, "平移参数")
+	_add_number(translation_column, "target.speed", "平移速度 / m·s⁻¹", 0, 10, 0.1)
+	_add_number(translation_column, "target.acceleration", "平移加速度 / m·s⁻²", 0.1, 50, 0.1)
+	_add_number(translation_column, "target.heading", "平移方向 / °", -180, 180, 1)
+	_add_number(translation_column, "target.travel", "往返半程 / m", 0.1, 10, 0.1)
 	_add_toggle(column, "target.rotate", "开启自转")
-	_add_number(column, "target.omega", "旋转速度 / rad·s⁻¹", -25, 25, 0.1)
-	_add_number(column, "target.module_width", "模块外宽 / m", 0.05, 0.3, 0.001)
-	_add_number(column, "target.module_height", "模块外高 / m", 0.04, 0.3, 0.001)
-	_add_number(column, "target.armor_width", "命中区宽（近似）/ m", 0.05, 0.3, 0.005)
-	_add_number(column, "target.armor_height", "命中区高（近似）/ m", 0.04, 0.3, 0.001)
-	_add_number(column, "target.lightbar_spacing", "灯条间距 / m", 0.05, 0.3, 0.005)
+	var rotation_column = _add_foldout(column, "自转参数")
+	_add_number(rotation_column, "target.omega", "旋转速度 / rad·s⁻¹", -25, 25, 0.1)
+	_add_number(hidden_controls, "target.module_width", "模块外宽 / m", 0.05, 0.3, 0.001)
+	_add_number(hidden_controls, "target.module_height", "模块外高 / m", 0.04, 0.3, 0.001)
+	_add_number(hidden_controls, "target.armor_width", "命中区宽（近似）/ m", 0.05, 0.3, 0.005)
+	_add_number(hidden_controls, "target.armor_height", "命中区高（近似）/ m", 0.04, 0.3, 0.001)
+	_add_number(hidden_controls, "target.lightbar_spacing", "灯条间距 / m", 0.05, 0.3, 0.005)
 	_section(column, "02  发射与响应")
 	_add_number(column, "weapon.speed", "弹速 / m·s⁻¹", 1, 100, 0.5)
 	_add_number(column, "weapon.damage", "单发伤害 / HP", 0, 10000, 1)
-	_add_number(column, "weapon.rate", "射频 / Hz", 0.1, 50, 0.5)
+	_add_number(column, "weapon.rate", "射击频率 / Hz", 0.1, 50, 0.1)
 	_add_number(column, "weapon.delay", "发射延迟 / ms", 0, 1000, 1)
 	_add_toggle(column, "gimbal.ideal", "理想云台（指令立即到位）")
-	_add_number(column, "gimbal.max_speed", "云台限速 / rad·s⁻¹", 0.1, 20, 0.1)
-	_add_number(column, "gimbal.max_acceleration", "角加速度 / rad·s⁻²", 0.1, 500, 1)
+	_add_number(hidden_controls, "gimbal.max_speed", "云台限速 / rad·s⁻¹", 0.1, 20, 0.1)
+	_add_number(hidden_controls, "gimbal.max_acceleration", "角加速度 / rad·s⁻²", 0.1, 500, 1)
 	_section(column, "03  相机")
 	camera_resolution = OptionButton.new()
 	for size in CAMERA_RESOLUTIONS:
@@ -321,16 +331,16 @@ func _build_ui() -> void:
 	_add_number(column, "camera.width", "图像宽 / px", 160, 3840, 1)
 	_add_number(column, "camera.height", "图像高 / px", 120, 2160, 1)
 	_add_number(column, "camera.vertical_fov", "垂直视场角 / °", 10, 120, 1)
-	_add_slider(column, "camera.brightness_gain", "相机曝光增益 / ×", 0, 4)
+	_add_slider(hidden_controls, "camera.brightness_gain", "相机曝光增益 / ×", 0, 4)
 	fields["camera.brightness_gain"].step = 0.01
 	fields["camera.brightness_gain"].value_changed.connect(func(value: float):
 		slider_labels["camera.brightness_gain"].text = "相机曝光增益 %.2f× · 低于 1 减少曝光" % value)
 	column.add_child(_label("分辨率与内参同步更新，保留本轮统计。", 12, Color("91acbb"), true))
-	_section(column, "04  可替换模型")
+	_section(hidden_controls, "可替换模型")
 	armor_label = _label("装甲：内置灯条与贴图", 13, Color("91acbb"))
-	column.add_child(armor_label)
-	_add_button(column, "选择装甲 GLB / glTF", _choose_model)
-	_add_button(column, "恢复内置外观", func():
+	hidden_controls.add_child(armor_label)
+	_add_button(hidden_controls, "选择装甲 GLB / glTF", _choose_model)
+	_add_button(hidden_controls, "恢复内置外观", func():
 		selected_armor = ""
 		_update_model_labels()
 		_apply_fields())
@@ -362,12 +372,24 @@ func _build_ui() -> void:
 	remote.disabled = not bridge.bound
 	remote.toggled.connect(func(value): bridge.set_enabled(value))
 	manual_column.add_child(remote)
-	_section(column, "05  场景操作")
+	_section(column, "04  场景操作")
 	_add_button(column, "R  重置本轮", _reset_current)
 	_add_button(column, "V  切换主视角", _toggle_view)
+	coordinate_toggle = CheckButton.new()
+	coordinate_toggle.text = "显示坐标与角点"
+	coordinate_toggle.toggled.connect(_toggle_coordinates)
+	column.add_child(coordinate_toggle)
+	for spec in [["O", "odom 坐标系"], ["G", "云台坐标系"],
+		["C", "相机坐标系"], ["M", "枪口坐标系"]]:
+		var button = CheckBox.new()
+		button.text = "%s %s" % [spec[0], spec[1]]
+		button.button_pressed = world.coordinate_overlay.reference_frames[spec[0]]
+		button.toggled.connect(_set_coordinate_frame.bind(spec[0]))
+		coordinate_frames[spec[0]] = button
+		column.add_child(button)
 	_add_button(column, "保存当前配置", _save_config)
 	_add_button(column, "导出统计与事件", _export_stats)
-	_add_button(column, "保存云台图像", _capture_sensor)
+	_add_button(hidden_controls, "保存云台图像", _capture_sensor)
 	column.add_child(_label("方向键调云台 · 右键拖动观察\n滚轮缩放 · 网格间距 1 m", 12, Color("91acbb")))
 	var header = PanelContainer.new()
 	header.position = Vector2(356, 18)
@@ -408,6 +430,20 @@ func _build_ui() -> void:
 	var sensor_reticle = Reticle.new()
 	sensor_reticle.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	frame.add_child(sensor_reticle)
+	coordinate_panel = PanelContainer.new()
+	coordinate_panel.set_anchors_preset(Control.PRESET_RIGHT_WIDE)
+	coordinate_panel.offset_left = -422
+	coordinate_panel.offset_right = -18
+	coordinate_panel.offset_top = 458
+	coordinate_panel.offset_bottom = -130
+	coordinate_panel.add_theme_stylebox_override("panel", _panel_style(Color(0.035, 0.07, 0.11, 0.96)))
+	coordinate_panel.visible = false
+	ui_root.add_child(coordinate_panel)
+	var coordinate_scroll = ScrollContainer.new()
+	coordinate_scroll.horizontal_scroll_mode = ScrollContainer.SCROLL_MODE_DISABLED
+	coordinate_panel.add_child(coordinate_scroll)
+	coordinate_readout = _label("", 14)
+	coordinate_scroll.add_child(coordinate_readout)
 	main_reticle = Reticle.new()
 	main_reticle.set_anchors_and_offsets_preset(Control.PRESET_FULL_RECT)
 	main_reticle.visible = world.first_person
@@ -576,9 +612,26 @@ func _toggle_view() -> void:
 	_sync_view()
 
 
+func _toggle_coordinates(value: bool) -> void:
+	world.coordinate_overlay.enabled = value
+	if value and world.first_person:
+		_toggle_view()
+	world.update_world()
+	_sync_view()
+	_update_status()
+
+
+func _set_coordinate_frame(value: bool, key: String) -> void:
+	world.coordinate_overlay.reference_frames[key] = value
+	world.update_world()
+	_update_status()
+
+
 func _sync_view() -> void:
 	first_person_image.visible = world.first_person
 	get_viewport().disable_3d = world.first_person
+	if coordinate_panel != null:
+		coordinate_panel.visible = world.coordinate_overlay.enabled and not world.first_person
 
 
 func _robot_selected(index: int) -> void:
@@ -596,6 +649,7 @@ func _robot_selected(index: int) -> void:
 
 
 func _update_status() -> void:
+	coordinate_readout.text = world.coordinate_overlay.readout
 	var s = model.metrics()
 	var health_input: SpinBox = fields["target.max_health"]
 	if get_viewport().gui_get_focus_owner() != health_input.get_line_edit():
@@ -604,8 +658,9 @@ func _update_status() -> void:
 		_updating_fields = false
 	status_label.text = "  %s   ·   T %.2f s   ·   %s   ·   %d FPS" % [
 		"PAUSED" if model.paused else "RUNNING", model.time, bridge.status, Engine.get_frames_per_second()]
-	stats_label.text = "  命中 %d / %d    %.1f%%    发射 %d    飞行中 %d" % [
-		s.hit, s.resolved, s.hit_rate * 100.0, s.fired, s.in_flight]
+	stats_label.text = "  有效命中 %d / %d    %.1f%% %s    飞行中 %d" % [
+		s.valid_hits, s.score_fired, s.score_hit_rate * 100.0,
+		"（成绩已冻结）" if s.score_frozen else "", s.in_flight]
 	health_label.text = "  靶车血量 %d / %d HP  ·  %s  ·  累计伤害 %d  ·  击毁 %d" % [
 		model.health, model.max_health, "存活" if model.health > 0 else "已击毁 / 灯条熄灭", s.damage, s.kills]
 	health_label.add_theme_color_override("font_color", Color("5be2d4") if model.health > 0 else Color("ff6a72"))
@@ -774,6 +829,24 @@ func _section(parent: VBoxContainer, text: String) -> void:
 	var separator = HSeparator.new()
 	parent.add_child(separator)
 	parent.add_child(_label(text, 14, Color("5be2d4")))
+
+
+func _add_foldout(parent: VBoxContainer, title: String) -> VBoxContainer:
+	var button = Button.new()
+	button.text = "▶ %s（展开）" % title
+	button.toggle_mode = true
+	parent.add_child(button)
+	var panel = PanelContainer.new()
+	panel.add_theme_stylebox_override("panel", _panel_style(Color("102331")))
+	panel.hide()
+	parent.add_child(panel)
+	button.toggled.connect(func(expanded: bool):
+		panel.visible = expanded
+		button.text = ("▼ %s（收起）" if expanded else "▶ %s（展开）") % title)
+	var column = VBoxContainer.new()
+	column.add_theme_constant_override("separation", 10)
+	panel.add_child(column)
+	return column
 
 
 func _add_button(parent: VBoxContainer, text: String, action: Callable) -> Button:

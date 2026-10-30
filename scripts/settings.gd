@@ -4,8 +4,8 @@ const Presets = preload("res://scripts/presets.gd")
 
 static func defaults() -> Dictionary:
 	var result = {
-		"appearance": {"robot": "infantry_3", "team": "blue", "body_model": "",
-			"armor_model": "", "body_scale": 1.0, "armor_scale": 1.0},
+		"appearance": {"robot": "infantry_3", "team": "blue",
+			"armor_model": "", "armor_scale": 1.0},
 		"target": {"center": Vector3(4, 0, 0), "position_offset": Vector3.ZERO, "translate": false, "speed": 1.0,
 			"acceleration": 3.0,
 			"heading": PI / 2.0, "travel": 1.5, "rotate": false, "omega": 4.0,
@@ -13,7 +13,7 @@ static func defaults() -> Dictionary:
 			"armor_width": 0.135, "armor_height": 0.125, "armor_tilt": PI / 12.0,
 			"lightbar_spacing": 0.135, "lightbar_length": 0.056,
 			"module_width": 0.140, "module_height": 0.125, "max_health": -1},
-		"gimbal": {"origin": Vector3(0, 0, 0.65), "barrel_length": 0.22, "ideal": false,
+		"gimbal": {"origin": Vector3(0, 0, 0.65), "barrel_length": 0.22, "ideal": true,
 			"max_speed": 6.0, "max_acceleration": 50.0, "response_hz": 6.0,
 			"pitch_min": -PI / 6.0, "pitch_max": PI / 9.0},
 		"weapon": {"speed": 23.0, "rate": 10.0, "delay": 0.015,
@@ -92,7 +92,7 @@ static func validate(s: Dictionary) -> String:
 	if not type_error.is_empty():
 		return type_error
 	var bounds = {
-		"appearance.body_scale": [0.001, 1000.0], "appearance.armor_scale": [0.001, 1000.0],
+		"appearance.armor_scale": [0.001, 1000.0],
 		"target.speed": [0.0, 10.0], "target.acceleration": [0.1, 50.0],
 		"target.travel": [0.1, 10.0],
 		"target.omega": [-25.0, 25.0], "target.radius": [0.001, 0.3],

@@ -16,9 +16,10 @@
 #include <unistd.h>
 #include <nlohmann/json.hpp>
 #include <rclcpp/rclcpp.hpp>
-#include <geometry_msgs/msg/pose_array.hpp>
-#include <sensor_msgs/msg/joint_state.hpp>
-#include <std_msgs/msg/bool.hpp>
+#include "rm_aim_sim_bridge/msg/aim_command.hpp"
+#include "rm_aim_sim_bridge/msg/armor_corners_array.hpp"
+#include "rm_aim_sim_bridge/msg/gimbal_state.hpp"
+#include "rm_aim_sim_bridge/msg/telemetry.hpp"
 #include <rosgraph_msgs/msg/clock.hpp>
 
 namespace fs = std::filesystem;
@@ -80,7 +81,9 @@ TEST(RosBridge, CoordinatesControlGravityAndWatchdogs)
   const fs::path mailbox = fs::path("/dev/shm") / ("rm_aim_sim_" + channel);
   fs::create_directories(temporary);
   const auto config = temporary / "scenario.cfg";
-  std::ofstream(config) << "[ipc]\nchannel=\"" << channel << "\"\n[weapon]\ndamage=0\n";
+  std::ofstream(config) << "[ipc]\nchannel=\"" << channel <<
+    "\"\n[weapon]\nspeed=25.5\ngravity=9.6\nrate=8.0\ndelay=0.02\ndamage=7\n"
+    "[gimbal]\nbarrel_length=0.25\nideal=false\n[target]\nphase=2.356194490192345\n";
   // Isolate DDS and /clock from any running user simulator.
   ::setenv("ROS_DOMAIN_ID", std::to_string(100 + ::getpid() % 100).c_str(), 1);
   {
@@ -92,18 +95,29 @@ TEST(RosBridge, CoordinatesControlGravityAndWatchdogs)
     struct Shutdown {~Shutdown() {rclcpp::shutdown();}} shutdown;
     auto node = std::make_shared<rclcpp::Node>("bridge_test_driver");
     const auto qos = rclcpp::QoS(1).reliable();
-    std::optional<sensor_msgs::msg::JointState> actual;
-    std::optional<geometry_msgs::msg::PoseArray> armors;
+    using GimbalState = rm_aim_sim_bridge::msg::GimbalState;
+    std::optional<GimbalState> actual;
+    bool yaw_motion_received = false;
+    bool pitch_motion_received = false;
+    using ArmorCornersArray = rm_aim_sim_bridge::msg::ArmorCornersArray;
+    std::optional<ArmorCornersArray> armors;
+    using Telemetry = rm_aim_sim_bridge::msg::Telemetry;
+    std::optional<Telemetry> telemetry;
     bool clock_received = false;
-    auto joints_sub = node->create_subscription<sensor_msgs::msg::JointState>(ns + "/gimbal", qos,
-      [&](sensor_msgs::msg::JointState::ConstSharedPtr msg) {actual = *msg;});
-    auto armors_sub = node->create_subscription<geometry_msgs::msg::PoseArray>(ns + "/armors", qos,
-      [&](geometry_msgs::msg::PoseArray::ConstSharedPtr msg) {armors = *msg;});
+    auto gimbal_sub = node->create_subscription<GimbalState>(ns + "/gimbal", qos,
+      [&](GimbalState::ConstSharedPtr msg) {
+        actual = *msg;
+        yaw_motion_received = yaw_motion_received || msg->yaw_velocity > .001;
+        pitch_motion_received = pitch_motion_received || msg->pitch_velocity > .001;
+      });
+    auto armors_sub = node->create_subscription<ArmorCornersArray>(ns + "/armors", qos,
+      [&](ArmorCornersArray::ConstSharedPtr msg) {armors = *msg;});
+    auto telemetry_sub = node->create_subscription<Telemetry>(
+      ns + "/telemetry", qos, [&](Telemetry::ConstSharedPtr msg) {telemetry = *msg;});
     auto clock_sub = node->create_subscription<rosgraph_msgs::msg::Clock>(ns + "/clock", qos,
       [&](rosgraph_msgs::msg::Clock::ConstSharedPtr) {clock_received = true;});
-    auto commands = node->create_publisher<sensor_msgs::msg::JointState>(ns + "/command", qos);
-    auto enable = node->create_publisher<std_msgs::msg::Bool>(ns + "/enable", qos);
-    auto fire = node->create_publisher<std_msgs::msg::Bool>(ns + "/fire", qos);
+    using AimCommand = rm_aim_sim_bridge::msg::AimCommand;
+    auto commands = node->create_publisher<AimCommand>(ns + "/command", qos);
     auto spin_for = [&](double seconds, const std::function<void()> & action) {
         const auto end = Clock::now() + std::chrono::duration<double>(seconds);
         while (Clock::now() < end) {
@@ -121,48 +135,104 @@ TEST(RosBridge, CoordinatesControlGravityAndWatchdogs)
         }
         return false;
       };
-    ASSERT_TRUE(wait_for([&] {return actual && armors && !armors->poses.empty() && clock_received;}))
+    ASSERT_TRUE(wait_for([&] {
+      return actual && armors && !armors->armors.empty() && telemetry && clock_received && !armors->session_id.empty();
+    }))
       << "Logs: " << temporary;
     EXPECT_EQ(armors->header.frame_id, "odom");
+    EXPECT_EQ(actual->header.frame_id, "odom");
+    EXPECT_EQ(telemetry->header.frame_id, "odom");
+    EXPECT_DOUBLE_EQ(telemetry->speed, 25.5);
+    EXPECT_DOUBLE_EQ(telemetry->gravity, 9.6);
+    EXPECT_DOUBLE_EQ(telemetry->barrel_length, .25);
+    EXPECT_DOUBLE_EQ(telemetry->rate, 8.0);
+    EXPECT_DOUBLE_EQ(telemetry->delay, .02);
     auto state = read_state(mailbox);
     ASSERT_TRUE(state.is_object());
-    const auto & position = armors->poses.front().position;
-    bool matched = false;
-    for (const auto & armor : state["truth"]["armors"]) {
-      const auto & center = armor["center"];
-      const auto & origin = state["gimbal"]["origin"];
-      if (std::abs(position.x - (center[0].get<double>() - origin[0].get<double>())) < 1e-6 &&
-        std::abs(position.y - (center[1].get<double>() - origin[1].get<double>())) < 1e-6 &&
-        std::abs(position.z - (center[2].get<double>() - origin[2].get<double>())) < 1e-6)
-      {matched = true;}
+    EXPECT_TRUE(state.contains("health") && state.contains("stats"));
+    const auto session = armors->session_id;
+    EXPECT_EQ(session, state["publisher_id"].get<std::string>() + "/" + state["session_id"].get<std::string>());
+    EXPECT_EQ(node->count_publishers(ns + "/session"), 0U);
+    ASSERT_EQ(armors->armors.size(), 2U);  // Both facing plates are exposed for student selection.
+    EXPECT_EQ(armors->armors.size(), state["camera"]["armors"].size());
+    for (const auto & observed : armors->armors) {
+      bool matched = false;
+      for (const auto & armor : state["truth"]["armors"]) {
+        const auto & corners = armor["corners"];
+        const auto & origin = state["gimbal"]["origin"];
+        bool same = true;
+        for (size_t i = 0; i < observed.corners.size(); ++i) {
+          same = same &&
+            std::abs(observed.corners[i].x - (corners[i][0].get<double>() - origin[0].get<double>())) < 1e-6 &&
+            std::abs(observed.corners[i].y - (corners[i][1].get<double>() - origin[1].get<double>())) < 1e-6 &&
+            std::abs(observed.corners[i].z - (corners[i][2].get<double>() - origin[2].get<double>())) < 1e-6;
+        }
+        if (same) {
+          bool visible = false;
+          for (const auto & observation : state["camera"]["armors"]) {
+            visible = visible || observation["id"] == armor["id"];
+          }
+          EXPECT_TRUE(visible);
+          matched = true;
+        }
+      }
+      EXPECT_TRUE(matched);  // Every corner is translated, never rotated into the camera frame.
     }
-    EXPECT_TRUE(matched);
 
-    auto send = [&](double yaw, double pitch, bool shoot, bool send_enable = true) {
-        if (!actual) {return;}
-        sensor_msgs::msg::JointState command;
-        command.header = actual->header;
-        command.name = {"yaw", "pitch"};
-        command.position = {yaw, pitch};
+    auto send = [&](double yaw, double pitch, bool shoot, bool enabled = true) {
+        if (!armors) {return;}
+        AimCommand command;
+        command.header = armors->header;
+        command.session_id = armors->session_id;
+        command.yaw = yaw;
+        command.pitch = pitch;
+        command.enable = enabled;
+        command.fire = shoot;
         commands->publish(command);
-        std_msgs::msg::Bool message;
-        if (send_enable) {message.data = true; enable->publish(message);}
-        message.data = shoot;
-        fire->publish(message);
       };
     spin_for(1.2, [&] {send(.1, .04, false);});
     ASSERT_TRUE(actual);
-    EXPECT_NEAR(actual->position[0], .1, .005);
-    EXPECT_NEAR(actual->position[1], .04, .005);
+    EXPECT_NEAR(actual->yaw, .1, .005);
+    EXPECT_NEAR(actual->pitch, .04, .005);
+    // Servo mode exercises nonzero velocity fields and their ROS signs.
+    EXPECT_TRUE(yaw_motion_received);
+    EXPECT_TRUE(pitch_motion_received);
+    EXPECT_NEAR(actual->yaw_velocity, 0.0, .005);
+    EXPECT_NEAR(actual->pitch_velocity, 0.0, .005);
     state = read_state(mailbox);
     EXPECT_NEAR(state["gimbal"]["pitch"].get<double>(), -.04, .005);
     EXPECT_EQ(state["stats"]["fired"].get<int>(), 0);
 
-    ASSERT_TRUE(wait_for([&] {return armors && !armors->poses.empty();}));
-    const auto target = armors->poses.front().position;
+    // An older computation must not replace the current angles or fire decision.
+    AimCommand old;
+    old.header = actual->header;
+    old.header.stamp = rclcpp::Time(old.header.stamp) - rclcpp::Duration::from_seconds(.1);
+    old.session_id = session;
+    old.yaw = -.6;
+    old.pitch = -.2;
+    old.enable = old.fire = true;
+    spin_for(.12, [&] {commands->publish(old);});
+    EXPECT_NEAR(actual->yaw, .1, .005);
+    EXPECT_EQ(read_state(mailbox)["stats"]["fired"].get<int>(), 0);
+
+    // A packet with a current timestamp but an old session cannot rearm control.
+    spin_for(.3, [&] {
+      old.header = actual->header;
+      old.session_id = "previous-publisher/previous-session";
+      commands->publish(old);
+    });
+    EXPECT_EQ(read_state(mailbox)["stats"]["fired"].get<int>(), 0);
+
+    ASSERT_TRUE(wait_for([&] {return armors && !armors->armors.empty();}));
+    geometry_msgs::msg::Point target;
+    for (const auto & corner : armors->armors.front().corners) {
+      target.x += corner.x * .25;
+      target.y += corner.y * .25;
+      target.z += corner.z * .25;
+    }
     const double horizontal = std::hypot(target.x, target.y);
-    const auto weapon = state["weapon"];
-    const double speed = weapon["speed"], gravity = weapon["gravity"], length = weapon["barrel_length"];
+    // The student can solve using published ballistic parameters alone.
+    const double speed = telemetry->speed, gravity = telemetry->gravity, length = telemetry->barrel_length;
     double elevation = std::atan2(target.z, horizontal);
     for (int i = 0; i < 12; ++i) {
       const double d = horizontal - length * std::cos(elevation);
@@ -184,11 +254,12 @@ TEST(RosBridge, CoordinatesControlGravityAndWatchdogs)
     spin_for(.3, [] {});
     EXPECT_EQ(read_state(mailbox)["stats"]["fired"].get<int>(), fired);
 
-    // No rearming from angle/fire streams alone after enable has expired.
+    // An atomic disabled command cannot rearm shooting even with fire=true.
     spin_for(.4, [&] {send(yaw, elevation, true, false);});
     EXPECT_EQ(read_state(mailbox)["stats"]["fired"].get<int>(), fired);
     simulator.stop();
-    ASSERT_TRUE(wait_for([&] {return armors && armors->poses.empty();}, 2));
+    ASSERT_TRUE(wait_for([&] {return armors && armors->armors.empty();}, 2));
+    EXPECT_EQ(armors->session_id, session);
   }
   fs::remove_all(mailbox);
   fs::remove_all(temporary);

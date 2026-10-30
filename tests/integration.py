@@ -127,6 +127,25 @@ def main():
             assert len(state["truth"]["armors"]) == 4
             assert state["stats"]["fired"] == state["stats"]["resolved"]
             print("PASS: Shared-memory feedback reports damage, death and absent lightbar observations")
+            score_keys = ("valid_hits", "score_fired", "score_hit_rate", "score_frozen", "kill_time")
+            frozen_score = {key: state["stats"][key] for key in score_keys}
+            assert frozen_score["score_frozen"] and frozen_score["valid_hits"] == 18
+            assert frozen_score["score_fired"] >= frozen_score["valid_hits"]
+            assert math.isclose(frozen_score["score_hit_rate"],
+                                frozen_score["valid_hits"] / frozen_score["score_fired"])
+            assert frozen_score["kill_time"] == state["health"]["death_time"]
+            previous_hits = state["stats"]["hit"]
+            end = time.monotonic() + 0.5
+            while time.monotonic() < end:
+                send(fire=True)
+                state = read_state(end + 1)
+            send(control=False)
+            end = time.monotonic() + 0.4
+            while time.monotonic() < end:
+                state = read_state(end + 1)
+            assert state["stats"]["hit"] > previous_hits
+            assert {key: state["stats"][key] for key in score_keys} == frozen_score
+            print("PASS: post-death hits retain physical statistics without changing frozen score")
             print("FINAL", json.dumps(state["stats"]))
         finally:
             process.terminate()

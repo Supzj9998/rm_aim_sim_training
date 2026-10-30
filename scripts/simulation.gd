@@ -21,6 +21,7 @@ var pending: Array[float] = []
 var events: Array[Dictionary] = []
 var impacts: Array[Dictionary] = []
 var stats: Dictionary
+var round_score: Dictionary
 var next_trigger = 0.0
 var next_shot_id = 0
 var first_hit_time = -1.0
@@ -59,13 +60,14 @@ func reset(initial: Dictionary = {}) -> void:
 	pending.clear()
 	events.clear()
 	impacts.clear()
-	stats = {"fired": 0, "hit": 0, "body": 0, "ground": 0, "expired": 0,
+	stats = {"fired": 0, "hit": 0, "ground": 0, "expired": 0,
 		"damage": 0, "kills": 0}
 	next_trigger = 0.0
 	next_shot_id = 0
 	first_hit_time = -1.0
 	max_health = _configured_health(settings)
 	health = max_health
+	round_score = {"frozen": health <= 0, "valid_hits": 0, "fired": 0, "kill_time": -1.0}
 	death_time = -1.0
 	next_health_event_id = 0
 	armor_light_off_until.resize(4)
@@ -124,6 +126,8 @@ func apply_settings(updated: Dictionary, reset_health: bool = false) -> void:
 		next_health_event_id += 1
 		_trim_events()
 	motion_stop_time = time if health <= 0 else -1.0
+	if health <= 0:
+		round_score.frozen = true
 
 
 func set_command(value: Dictionary) -> void:
@@ -234,6 +238,16 @@ func armor_pose(index: int, at: float) -> Dictionary:
 		"up": up, "normal_yaw": wrapf(angle, -PI, PI)}
 
 
+func armor_corners(index: int, at: float) -> Array[Vector3]:
+	var armor = armor_pose(index, at)
+	var corners: Array[Vector3] = []
+	# Scoring rectangle, TL/TR/BR/BL as viewed from the outward face.
+	for uv in [Vector2(-1, 1), Vector2(1, 1), Vector2(1, -1), Vector2(-1, -1)]:
+		corners.append(armor.center + armor.tangent * uv.x * settings.target.armor_width * 0.5
+			+ armor.up * uv.y * settings.target.armor_height * 0.5)
+	return corners
+
+
 func camera_pose() -> Dictionary:
 	var f = forward(yaw, pitch)
 	var right = Vector3(sin(yaw), -cos(yaw), 0)
@@ -329,21 +343,35 @@ func _substep(dt: float) -> void:
 		while next_trigger <= end + 1e-9:
 			pending.append(maxf(time, next_trigger) + settings.weapon.delay)
 			next_trigger = maxf(time, next_trigger) + 1.0 / settings.weapon.rate
+	var releases: Array[float] = []
 	while not pending.is_empty() and pending.front() <= end + 1e-9:
 		var release = pending.pop_front()
 		var weight = clampf((release - time) / dt, 0.0, 1.0)
+		var fired_before: int = stats.fired
 		_spawn(release, lerp_angle(old_yaw, yaw, weight), lerpf(old_pitch, pitch, weight))
+		if stats.fired > fired_before:
+			releases.append(release)
+	var collisions: Array[Dictionary] = []
 	for i in range(projectiles.size() - 1, -1, -1):
 		var bullet = projectiles[i]
 		var start: float = maxf(time, bullet.born)
 		var result = _collision(bullet, start, end)
 		if not result.is_empty():
-			_finish(bullet, result)
+			collisions.append({"bullet": bullet, "result": result})
 			projectiles.remove_at(i)
 		elif end - bullet.born >= settings.weapon.lifetime or _outside_target_range(bullet, end):
 			_finish(bullet, {"kind": "expired", "time": end, "point": bullet_position(bullet, end),
 				"reason": "lifetime" if end - bullet.born >= settings.weapon.lifetime else "range"})
 			projectiles.remove_at(i)
+	# Lethal hits and the score cutoff must follow impact time, not array order.
+	collisions.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return a.result.time < b.result.time)
+	for collision in collisions:
+		var later_releases = 0
+		for release in releases:
+			if release > collision.result.time:
+				later_releases += 1
+		_finish(collision.bullet, collision.result, later_releases)
 	time = end
 
 
@@ -357,6 +385,8 @@ func _spawn(at: float, actual_yaw: float, actual_pitch: float) -> void:
 	projectiles.append(bullet)
 	next_shot_id += 1
 	stats.fired += 1
+	if not round_score.frozen and health > 0:
+		round_score.fired += 1
 	events.append({"type": "shot", "id": bullet.id, "time": at,
 		"yaw": actual_yaw, "pitch": actual_pitch})
 	_trim_events()
@@ -418,7 +448,7 @@ func _collision(bullet: Dictionary, start: float, end: float) -> Dictionary:
 	return best
 
 
-func _finish(bullet: Dictionary, result: Dictionary) -> void:
+func _finish(bullet: Dictionary, result: Dictionary, later_releases: int = 0) -> void:
 	stats[result.kind] += 1
 	if result.kind == "hit" and first_hit_time < 0.0:
 		first_hit_time = result.time
@@ -429,6 +459,8 @@ func _finish(bullet: Dictionary, result: Dictionary) -> void:
 	var damage = 0
 	var killed = false
 	if result.kind == "hit" and health > 0:
+		if not round_score.frozen:
+			round_score.valid_hits += 1
 		var armor_id: int = result.armor_id
 		armor_light_off_until[armor_id] = maxf(armor_light_off_until[armor_id], result.time + HIT_FLASH_DURATION)
 		damage = mini(health, int(bullet.get("damage", settings.weapon.damage)))
@@ -439,6 +471,11 @@ func _finish(bullet: Dictionary, result: Dictionary) -> void:
 			motion_stop_time = result.time
 			stats.kills += 1
 			killed = true
+			if not round_score.frozen:
+				# Releases later in this substep are physical shots, outside this round's cutoff.
+				round_score.fired -= later_releases
+				round_score.frozen = true
+				round_score.kill_time = result.time
 	event["damage"] = damage
 	event["health"] = health
 	event["killed"] = killed
@@ -458,7 +495,7 @@ func _trim_events() -> void:
 
 
 func metrics() -> Dictionary:
-	var resolved: int = stats.hit + stats.body + stats.ground + stats.expired
+	var resolved: int = stats.hit + stats.ground + stats.expired
 	var result = stats.duplicate()
 	result["in_flight"] = projectiles.size()
 	result["pending"] = pending.size()
@@ -466,6 +503,11 @@ func metrics() -> Dictionary:
 	result["hit_rate"] = float(stats.hit) / resolved if resolved > 0 else 0.0
 	result["hits_per_second"] = float(stats.hit) / time if time > 0.0 else 0.0
 	result["first_hit_time"] = first_hit_time
+	result["valid_hits"] = round_score.valid_hits
+	result["score_fired"] = round_score.fired
+	result["score_hit_rate"] = float(round_score.valid_hits) / round_score.fired if round_score.fired > 0 else 0.0
+	result["score_frozen"] = round_score.frozen
+	result["kill_time"] = round_score.kill_time
 	return result
 
 
@@ -475,8 +517,11 @@ func snapshot() -> Dictionary:
 	var armors: Array[Dictionary] = []
 	for i in range(4):
 		var a = armor_pose(i, time)
+		var corners: Array = []
+		for point in armor_corners(i, time):
+			corners.append(vec(point))
 		armors.append({"id": i, "center": vec(a.center), "normal": vec(a.normal),
-			"normal_yaw": a.normal_yaw})
+			"normal_yaw": a.normal_yaw, "corners": corners})
 	return {"protocol": "rm_aim_sim/2", "type": "state", "session_id": session_id,
 		"tick": tick, "sim_time": time, "paused": paused,
 		"gimbal": {"yaw": yaw, "pitch": pitch, "yaw_vel": yaw_velocity,

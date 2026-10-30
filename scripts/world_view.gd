@@ -2,6 +2,7 @@ extends Node3D
 
 const Assets = preload("res://scripts/visual_assets.gd")
 const Presets = preload("res://scripts/presets.gd")
+const CoordinateOverlay = preload("res://scripts/coordinate_overlay.gd")
 const PROJECTILE_DIAMETER = 0.0168
 const PROJECTILE_COLOR = Color("39ff14")
 const RICOCHET_LIFETIME = 0.8
@@ -11,6 +12,7 @@ var plates: Array[Node3D] = []
 var gun: Node3D
 var main_camera: Camera3D
 var sensor_camera: Camera3D
+var coordinate_overlay: Node3D
 var brightness_material: ShaderMaterial
 var raw_sensor_viewport: SubViewport
 var sensor_viewport: SubViewport
@@ -71,6 +73,7 @@ func build(simulation: RefCounted) -> void:
 	sensor_camera.fov = model.settings.camera.vertical_fov
 	sensor_camera.near = 0.02
 	sensor_camera.far = 80.0
+	sensor_camera.cull_mask &= ~CoordinateOverlay.LAYER
 	raw_sensor_viewport.add_child(sensor_camera)
 	sensor_camera.current = true
 	# Render 3D once; keep the raw main view separate from the exposure-processed output.
@@ -107,6 +110,9 @@ func build(simulation: RefCounted) -> void:
 	traces.mesh = trace_mesh
 	traces.material_override = _projectile_material()
 	add_child(traces)
+	coordinate_overlay = CoordinateOverlay.new()
+	coordinate_overlay.model = model
+	add_child(coordinate_overlay)
 	rebuild_target()
 	update_world()
 
@@ -134,7 +140,7 @@ func rebuild_target() -> void:
 		var custom = Assets.load_model(model.settings.appearance.armor_model)
 		if custom != null:
 			plate.add_child(Assets.fit_model(custom, model.settings.target.module_width,
-				model.settings.appearance.armor_scale, true))
+				model.settings.appearance.armor_scale))
 			Assets.tint_named_surfaces(custom, lamp_material)
 		else:
 			_build_armor(plate, lamp_material)
@@ -274,6 +280,7 @@ func update_world() -> void:
 		main_camera.position = focus + offset * orbit_distance
 		main_camera.look_at(focus)
 	_update_bullets()
+	coordinate_overlay.update_coordinates(not first_person)
 
 
 func _update_camera_exposure() -> void:
